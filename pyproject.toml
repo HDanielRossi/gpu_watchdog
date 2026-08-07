@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ai-guardian"
+version = "0.1.0"
+description = "Daemon de monitoreo y proteccion para el servidor de IA (GPU, sistema, Docker, servicios)."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+dependencies = [
+    "PyYAML>=6.0,<7",
+    "psutil>=5.9,<6",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+]
+
+[project.scripts]
+ai-guardian = "guardian.main:main"
+
+[tool.setuptools.packages.find]
+include = ["guardian*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

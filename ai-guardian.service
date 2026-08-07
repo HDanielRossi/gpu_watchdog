@@ -1,0 +1,48 @@
+[Unit]
+Description=AI Guardian - monitoreo y proteccion del servidor de IA
+Documentation=file:///opt/ai/guardian/README.md
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ai-guardian
+Group=ai-guardian
+
+# Configuracion y secretos separados del codigo, tal como pide CLAUDE.md.
+EnvironmentFile=-/etc/ai-guardian/guardian.env
+ExecStart=/opt/ai/guardian/.venv/bin/ai-guardian --config /etc/ai-guardian/config.yaml run
+
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+
+# --- Endurecimiento ---------------------------------------------------
+# No usar PrivateDevices=true: bloquearia el acceso de nvidia-smi a
+# /dev/nvidia*. No restringir AF_UNIX/AF_INET: se necesitan para el socket
+# de Docker y para las comprobaciones HTTP / Telegram.
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/log/ai-guardian
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

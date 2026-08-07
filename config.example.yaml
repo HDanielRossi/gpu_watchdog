@@ -1,0 +1,95 @@
+# Configuracion de ejemplo de AI Guardian.
+#
+# Copia este archivo a /etc/ai-guardian/config.yaml (install.sh lo hace por
+# ti sin sobreescribir una configuracion existente) y ajusta los valores a
+# tu gusto. Nunca pongas tokens ni contrasenas aqui: usa variables de
+# entorno (ver seccion `notifications.telegram` y /etc/ai-guardian/guardian.env).
+
+general:
+  interval_seconds: 10
+  dry_run: true # IMPORTANTE: dejar en true hasta validar el comportamiento en tu servidor
+  timezone: America/Mexico_City
+  # state_file: /var/log/ai-guardian/state.json  # opcional; por defecto se guarda junto al log
+
+logging:
+  level: INFO
+  file: /var/log/ai-guardian/guardian.log
+  max_bytes: 10485760
+  backup_count: 5
+
+gpu:
+  enabled: true
+  index: 0 # esta 3090 es la GPU 0; nvidia-smi soporta multiples GPUs si el servidor crece
+
+  thresholds:
+    warning_temperature_c: 78
+    critical_temperature_c: 84
+    emergency_temperature_c: 90
+
+    warning_duration_seconds: 30
+    critical_duration_seconds: 60
+    emergency_duration_seconds: 30
+
+    # Margen de histeresis: una alerta de 84C no se considera recuperada
+    # hasta bajar de (84 - hysteresis_margin_c) = 79C. Aplica a los 3 niveles.
+    hysteresis_margin_c: 5
+
+    maximum_vram_percent: 98
+    # El limite real de potencia de esta RTX 3090 es 420W (confirmado con
+    # `nvidia-smi --query-gpu=power.limit`). 350 es un techo conservador de
+    # ejemplo; súbelo a ~400 si genera advertencias falsas con carga normal.
+    maximum_power_watts: 350
+
+  actions:
+    log_warning: true
+    stop_comfyui_on_critical: false
+    stop_ollama_on_emergency: false
+    shutdown_on_emergency: false
+    # Evita repetir la misma accion (detener/apagar) mientras la condicion
+    # se mantenga activa; no aplica al registro de la advertencia/condicion.
+    action_cooldown_seconds: 300
+
+system:
+  minimum_free_disk_gb: 20
+  maximum_ram_percent: 95
+  maximum_swap_percent: 80
+  # / y /mnt/ai-storage comparten el mismo filesystem en este servidor;
+  # agrega mas rutas aqui si en el futuro son discos separados.
+  disk_paths:
+    - /
+
+docker:
+  enabled: true
+  restart_unhealthy_containers: false
+
+  # Nombres reales de los contenedores definidos en /opt/ai/compose.yaml y
+  # /opt/ai/stacks/*.yaml (container_name, no el nombre del servicio).
+  monitored_containers:
+    - comfyui
+    - ollama
+    - open-webui
+
+services:
+  comfyui:
+    enabled: true
+    container_name: comfyui
+    health_url: http://127.0.0.1:8188/
+
+  ollama:
+    enabled: true
+    container_name: ollama
+    health_url: http://127.0.0.1:11434/api/tags
+
+  open_webui:
+    enabled: true
+    container_name: open-webui
+    health_url: http://127.0.0.1:3000
+
+notifications:
+  enabled: false
+  cooldown_seconds: 300
+
+  telegram:
+    enabled: false
+    bot_token_env: AI_GUARDIAN_TELEGRAM_TOKEN
+    chat_id_env: AI_GUARDIAN_TELEGRAM_CHAT_ID
