@@ -141,8 +141,15 @@ class GuardianDaemon:
             log_event(logger, logging.INFO, f"{event.rule_name}_recovered", metric=event.metric, value=event.value, threshold=event.threshold)
             if self.notification_dispatcher:
                 self._notify(snapshot, event, action_result=None, recovered=True)
+            return
 
-        if not event.newly_triggered:
+        # Se procesa tanto el disparo inicial (newly_triggered) como un
+        # reintento mientras la condicion sigue activa (can_act vuelve a
+        # True solo cuando expiro action_cooldown_seconds desde el ultimo
+        # intento, ver ThresholdWatcher.evaluate). Si la condicion sigue
+        # activa pero todavia esta en cooldown, ninguno de los dos es True
+        # y no se repite el log/accion en cada ciclo.
+        if not (event.newly_triggered or event.can_act):
             return
 
         if event.rule_name == "gpu_temperature_warning" and not self.config.gpu.actions.log_warning:
@@ -156,6 +163,7 @@ class GuardianDaemon:
         log_event(
             logger, level, event.rule_name,
             metric=event.metric, value=event.value, threshold=event.threshold, duration=event.duration_seconds,
+            retry=not event.newly_triggered,
         )
 
         action_result = None

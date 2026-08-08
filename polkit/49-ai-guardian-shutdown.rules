@@ -42,6 +42,57 @@
 //   Identity=unix-user:ai-guardian
 //   Action=org.freedesktop.login1.power-off
 //   ResultAny=yes
+//
+// -----------------------------------------------------------------------
+// POLITICA: fail-closed para sesiones multiples e inhibitors (deliberado)
+// -----------------------------------------------------------------------
+//
+// systemd-logind puede exigir autorizacion para hasta TRES acciones
+// polkit distintas al pedir un apagado, segun el estado del host en ese
+// momento:
+//
+//   org.freedesktop.login1.power-off                    (siempre)
+//   org.freedesktop.login1.power-off-multiple-sessions   (si hay OTRAS
+//       sesiones activas ademas de la del que pide el apagado -- p.ej.
+//       alguien conectado por SSH o en la consola local)
+//   org.freedesktop.login1.power-off-ignore-inhibit      (si algun
+//       proceso tiene un "inhibitor lock" activo, p.ej. una actualizacion
+//       en curso, un backup, u otra herramienta que pidio explicitamente
+//       que no se apague el sistema)
+//
+// Esta regla autoriza EXCLUSIVAMENTE la primera. Las otras dos NO se
+// autorizan aqui, a proposito: si en el momento de una emergencia termica
+// hay otra sesion activa o un inhibitor tomado, la peticion de apagado de
+// AI Guardian sera RECHAZADA por polkit (fail-closed) en vez de forzar el
+// apagado por encima de una sesion humana activa o de un proceso que
+// pidio explicitamente no ser interrumpido.
+//
+// Por que fail-closed y no ampliar el permiso: otorgar
+// power-off-multiple-sessions o power-off-ignore-inhibit de forma
+// permanente significaria que AI Guardian podria apagar el servidor
+// mientras otra persona esta trabajando en el, o mientras un backup/
+// actualizacion esta a mitad de camino -- eso es exactamente el tipo de
+// dano silencioso que este proyecto intenta evitar. Ver la seccion
+// "Shutdown" en README.md para el comportamiento esperado en logs cuando
+// esto ocurre y como decidir, con conocimiento de causa, si tu caso de
+// uso justifica ampliar la politica.
+//
+// Si decides ampliar esto de todas formas (bajo tu propio riesgo, y solo
+// tras leer el README), el patron seria agregar cada action.id
+// explicitamente, NUNCA con un wildcard:
+//
+//   polkit.addRule(function(action, subject) {
+//       if (subject.user == "ai-guardian" && (
+//           action.id == "org.freedesktop.login1.power-off" ||
+//           action.id == "org.freedesktop.login1.power-off-multiple-sessions" ||
+//           action.id == "org.freedesktop.login1.power-off-ignore-inhibit"
+//       )) {
+//           return polkit.Result.YES;
+//       }
+//   });
+//
+// Esto se deja comentado intencionalmente: NO forma parte de la regla
+// activa de este archivo.
 
 polkit.addRule(function(action, subject) {
     if (action.id == "org.freedesktop.login1.power-off" &&

@@ -137,13 +137,19 @@ class ThresholdWatcher:
             else:
                 self._exceeded_since = None
 
+        # can_act se evalua mientras la condicion siga activa (no solo en el
+        # instante en que se dispara por primera vez): esto permite
+        # reintentar una accion que fallo, una vez expirado el cooldown,
+        # sin necesidad de que la condicion se recupere y se dispare de
+        # nuevo. El cooldown sigue siendo la unica compuerta que evita
+        # ejecutar la accion en cada ciclo mientras la condicion persiste.
         can_act = False
-        if newly_triggered:
+        if self._active:
             in_cooldown = self._last_action_at is not None and (now - self._last_action_at).total_seconds() < cfg.cooldown_seconds
             can_act = not in_cooldown
             if can_act:
                 self._last_action_at = now
-            else:
+            elif newly_triggered:
                 logger.info(
                     "action_suppressed_cooldown rule=%s metric=%s value=%s cooldown_seconds=%s",
                     cfg.name, cfg.metric, value, cfg.cooldown_seconds,

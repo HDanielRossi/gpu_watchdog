@@ -204,3 +204,23 @@ def test_shutdown_real_run_invokes_shutdown_command_only_when_enabled_and_not_dr
     assert runner.calls
     assert runner.calls[0][:3] == ["shutdown", "-h", "+1"]
     assert "kill" not in " ".join(runner.calls[0]).lower()
+
+
+def test_shutdown_denied_by_polkit_reports_failure_without_raising():
+    # Documenta/verifica la politica fail-closed: si systemd-logind/polkit
+    # rechaza el apagado (p.ej. porque hay otra sesion activa o un
+    # inhibitor, ver README seccion "Shutdown"), el fallo se refleja en el
+    # ActionResult -- nunca se lanza una excepcion ni se reintenta un
+    # bypass por cuenta propia.
+    runner = RecordingRunner(_fail(
+        stderr="Failed to power off system via logind: Interactive authentication required.",
+        returncode=1,
+    ))
+    actions = SystemActions(dry_run=False, shutdown_enabled=True, command_runner=runner)
+
+    result = actions.safe_shutdown(reason="gpu_temperature_emergency")
+
+    assert result.success is False
+    assert result.dry_run is False
+    assert "authentication" in (result.error or "").lower()
+    assert runner.calls  # si se intento invocar el comando, solo que fallo

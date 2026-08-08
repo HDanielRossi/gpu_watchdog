@@ -292,6 +292,48 @@ privilegiado), no en el proceso de AI Guardian, por lo que es totalmente
 compatible con `NoNewPrivileges=true` — no se toca el endurecimiento del
 servicio.
 
+**Politica fail-closed para sesiones multiples e inhibitors (importante).**
+Segun el estado del host en el momento del apagado, `systemd-logind` puede
+exigir autorizacion polkit para hasta tres acciones distintas, no solo una:
+
+| Accion polkit | Cuando la exige logind | ¿Autorizada por nuestra regla? |
+|---|---|---|
+| `org.freedesktop.login1.power-off` | Siempre | Si |
+| `org.freedesktop.login1.power-off-multiple-sessions` | Hay OTRA sesion activa ademas de la que pide el apagado (SSH, consola local) | **No** (fail-closed) |
+| `org.freedesktop.login1.power-off-ignore-inhibit` | Un proceso tiene un inhibitor lock activo (backup, actualizacion en curso, etc.) | **No** (fail-closed) |
+
+Esto es deliberado, no un descuido: si en el momento de una emergencia
+termica hay alguien conectado al servidor o un proceso pidio
+explicitamente no ser interrumpido, **el apagado de emergencia sera
+rechazado por polkit** en vez de forzarse por encima de esa sesion o de
+ese inhibitor. La alternativa (autorizar tambien esas dos acciones)
+significaria que AI Guardian podria apagar el servidor mientras alguien
+trabaja en el o mientras un backup esta a mitad de camino — exactamente
+el tipo de dano silencioso que este proyecto busca evitar. `stop_comfyui_on_critical`
+y `stop_ollama_on_emergency` siguen ejecutandose igual (no dependen de
+logind/polkit), asi que la GPU igual se libera de carga aunque el
+apagado en si quede bloqueado.
+
+**Como se ve en los logs cuando el apagado es rechazado por esta razon:**
+`SystemActions.safe_shutdown()` nunca lanza: registra el fallo como
+cualquier otro fallo de accion, con el mensaje que devuelva `shutdown`/
+`systemd-logind` (tipicamente algo como *"Interactive authentication
+required"* o *"There are other users logged in"*, segun version de
+systemd) en el campo `error`:
+
+```
+action_failed action=safe_shutdown error=<mensaje de systemd-logind>
+```
+
+No hay reintento automático que "fuerce" el apagado saltandose esta
+compuerta — si eso ocurre, es una senal para que un humano revise por que
+hay otra sesion/inhibitor activo en ese momento, no algo que el daemon
+deba resolver solo. Si tu caso de uso realmente justifica ampliar la
+politica (por ejemplo, un servidor donde nunca hay sesiones humanas
+concurrentes), el patron para hacerlo esta documentado — pero deliberadamente
+comentado y deshabilitado — dentro de
+`polkit/49-ai-guardian-shutdown.rules`.
+
 **Como habilitarlo (opcional, dos pasos independientes):**
 
 1. Instala la regla polkit (una vez, requiere root):
@@ -339,19 +381,49 @@ cd /opt/ai/guardian
 sudo ./update.sh
 ```
 
-El script (`set -Eeuo pipefail`):
+El script (`set -Eeuo pipefail`) es **transaccional**: un candidato que
+falla los tests jamas sobreescribe el `.venv` real ni el working tree
+real, asi que si algo falla, la version instalada actualmente sigue siendo
+la unica que systemd puede llegar a arrancar (incluso ante un
+`Restart=on-failure` o un reinicio del servidor mas tarde). Secuencia:
 
 1. Verifica que `/opt/ai/guardian` es el repositorio correcto (remoto
-   `HDanielRossi/gpu_watchdog`).
+   `HDanielRossi/gpu_watchdog`) y que la rama actual coincide con la
+   configurada (`AI_GUARDIAN_UPDATE_BRANCH`, default `main`) — aborta si
+   estas en otra rama en vez de cambiarla por ti.
 2. Aborta si hay cambios locales sin confirmar (nunca ejecuta
    `git reset --hard` automaticamente).
-3. `git fetch` + `git merge --ff-only` (nunca reescribe historia local).
-4. Reinstala el paquete en el `.venv` existente.
-5. Corre `pytest -q` **antes** de tocar el servicio.
-6. Si los tests fallan, se detiene ahi: el servicio sigue corriendo con la
-   version anterior, sin reiniciarse.
-7. Solo si todo paso, reinicia `ai-guardian` y muestra
-   `systemctl status` al final.
+3. `git fetch` (sin tocar el working tree real) y determina el commit
+   candidato.
+4. Crea un **worktree temporal** en el commit candidato y un **venv
+   temporal** aislado, instala el candidato ahi y corre `pytest -q`
+   **contra esa copia aislada** — el `.venv` real y el working tree real
+   no se tocan en ningun momento de este paso.
+5. Si los tests fallan (o el candidato tiene algun otro problema), se
+   limpia el worktree/venv temporales y el script termina ahi: nada de lo
+   instalado cambia, el servicio ni se reinstala ni se reinicia.
+6. Solo si el candidato paso los tests: `git merge --ff-only` sobre el
+   working tree real (nunca reescribe historia local), reinstala el
+   `.venv` real con el codigo ya validado, reinicia `ai-guardian` y
+   muestra `systemctl status` al final.
+
+**Separacion de privilegios**: el script requiere `sudo` (necesita
+reinstalar el `.venv` real, que `install.sh` crea con dueno root, y
+reiniciar el servicio systemd), pero todas las operaciones de `git`
+(fetch, verificar rama/estado, worktree, merge) corren como el **usuario
+dueno del repositorio**, nunca como root directamente — evita que `git`
+deje archivos del working tree con ownership de root (lo que romperia que
+sigas usando el repo con tu usuario normal despues) y usa las
+credenciales/SSH-agent/config git de ese usuario en vez de las de root.
+El dueno se detecta automaticamente (dueno de `.git`); se puede fijar
+explicitamente con `AI_GUARDIAN_REPO_OWNER`.
+
+Comprobaciones de shell para las rutas de error (rama incorrecta, working
+tree sucio, remoto equivocado), sin tocar red/root/systemd:
+
+```bash
+bash tests/test_update_sh.sh
+```
 
 ## Storage
 
@@ -385,6 +457,13 @@ Toda la suite usa mocks/fakes para `nvidia-smi`, `docker`, `shutdown` y las
 llamadas HTTP: ningun test detiene contenedores reales, apaga el servidor,
 ni depende de tener una GPU o Docker disponibles. Por eso corre igual en
 CI (`.github/workflows/test.yml`, sin GPU ni Docker real).
+
+`update.sh` tiene ademas su propia suite de shell (sin sudo/root/red), ver
+[Updating](#updating):
+
+```bash
+bash tests/test_update_sh.sh
+```
 
 ## Como desinstalar
 

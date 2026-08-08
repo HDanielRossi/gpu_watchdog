@@ -17,6 +17,15 @@ regla polkit dedicada (ver `polkit/49-ai-guardian-shutdown.rules` y el
 README), no sudo ni capacidades nuevas: sudo es un binario setuid y
 `NoNewPrivileges=true` ignora su bit setuid, asi que una regla sudoers
 tampoco funcionaria aqui aunque se agregara.
+
+Politica fail-closed deliberada: la regla polkit solo autoriza la accion
+base `power-off`, no `power-off-multiple-sessions` ni
+`power-off-ignore-inhibit`. Si al momento de la emergencia hay otra sesion
+activa (SSH, consola) o un inhibitor tomado (backup, actualizacion en
+curso), la peticion sera rechazada por polkit y esta funcion devolvera
+`success=False` con el error de systemd-logind en `ActionResult.error`
+(nunca lanza, nunca reintenta por su cuenta el bypass). Ver README,
+seccion "Shutdown", para el detalle de esta politica y como se ve en logs.
 """
 from __future__ import annotations
 
