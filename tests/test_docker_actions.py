@@ -100,6 +100,65 @@ def test_get_status_survives_malformed_json():
     assert status.error is not None
 
 
+# --- estado tri-valor de Docker: True / False / None -------------------
+
+
+def test_running_is_true_when_docker_confirms_container_running():
+    stdout = '[{"State": {"Status": "running"}, "RestartCount": 0}]'
+    runner = RecordingRunner(_ok(stdout=stdout))
+    monitor = DockerMonitor(command_runner=runner)
+
+    status = monitor.get_status("comfyui")
+
+    assert status.running is True
+    assert status.status == "running"
+
+
+def test_running_is_false_when_docker_confirms_container_stopped():
+    stdout = '[{"State": {"Status": "exited"}, "RestartCount": 0}]'
+    runner = RecordingRunner(_ok(stdout=stdout))
+    monitor = DockerMonitor(command_runner=runner)
+
+    status = monitor.get_status("comfyui")
+
+    assert status.running is False
+    assert status.status == "exited"
+
+
+def test_running_is_false_when_container_does_not_exist():
+    # Docker SI respondio y confirmo que no existe: es una confirmacion
+    # valida de "no esta corriendo", distinta de "no se pudo consultar".
+    runner = RecordingRunner(_fail(stderr="Error: No such object: ghost"))
+    monitor = DockerMonitor(command_runner=runner)
+
+    status = monitor.get_status("ghost")
+
+    assert status.running is False
+    assert status.status == "not_found"
+
+
+def test_running_is_none_when_docker_cannot_be_queried():
+    # El socket de Docker esta inaccesible o el comando fallo por un motivo
+    # que no es "no existe": estado desconocido, NUNCA asumir detenido.
+    runner = RecordingRunner(_fail(error="timeout tras 5.0s"))
+    monitor = DockerMonitor(command_runner=runner)
+
+    status = monitor.get_status("comfyui")
+
+    assert status.running is None
+    assert status.status == "unknown"
+
+
+def test_running_is_none_when_inspect_output_is_malformed():
+    runner = RecordingRunner(_ok(stdout="esto no es json"))
+    monitor = DockerMonitor(command_runner=runner)
+
+    status = monitor.get_status("comfyui")
+
+    assert status.running is None
+    assert status.status == "unknown"
+
+
 # --- apagado: deshabilitado por defecto --------------------------------
 
 

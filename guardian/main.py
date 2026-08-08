@@ -109,7 +109,12 @@ class GuardianDaemon:
             container_status = containers.get(service_cfg.container_name)
             if container_status is None and docker_available:
                 container_status = self._docker_monitor.get_status(service_cfg.container_name)
-            running = bool(container_status and container_status.running)
+            if container_status is not None:
+                running = container_status.running  # True/False/None (tri-valor, ver ContainerStatus)
+            else:
+                # Docker no disponible en absoluto: estado desconocido, NUNCA
+                # asumir "detenido" (ver ServiceHealthChecker.check).
+                running = None
             services[service_name] = self._service_checker.check(service_name, service_cfg.health_url, running)
 
         return Snapshot(
@@ -169,13 +174,7 @@ class GuardianDaemon:
             return None
 
         if event.rule_name == "gpu_temperature_emergency":
-            # Prioridad: detener primero las cargas de IA antes de considerar apagar.
-            result = None
-            if self.config.gpu.actions.stop_ollama_on_emergency:
-                result = self._docker_actions.stop_container("ollama", reason=reason)
-            if self.config.gpu.actions.shutdown_on_emergency:
-                result = self._system_actions.safe_shutdown(reason=reason)
-            return result
+            return self._run_emergency_sequence(reason)
 
         if event.rule_name.startswith("docker_unhealthy_"):
             container_name = event.rule_name[len("docker_unhealthy_"):]
@@ -184,6 +183,54 @@ class GuardianDaemon:
             return None
 
         return None
+
+    def _run_emergency_sequence(self, reason: str) -> Optional[ActionResult]:
+        """Secuencia explicita de emergencia termica: detener ComfyUI ->
+        detener Ollama -> solicitar apagado del host.
+
+        No asume que `gpu_temperature_critical` se disparo antes (son
+        watchers independientes con duraciones distintas: EMERGENCY puede
+        activarse sin que CRITICAL lo haya hecho nunca). Cada paso se
+        ejecuta y registra de forma independiente segun su propio flag de
+        configuracion; un fallo o excepcion inesperada en un paso nunca
+        impide que se intenten los siguientes ni que quede registrado.
+        Reentrante/idempotente: cada accion subyacente (docker stop,
+        shutdown -h +1) ya es segura de repetir por si misma.
+        """
+        results: list[ActionResult] = []
+
+        if self.config.gpu.actions.stop_comfyui_on_critical:
+            results.append(self._run_emergency_step("emergency_stop_comfyui", lambda: self._docker_actions.stop_container("comfyui", reason=reason), reason))
+        else:
+            log_event(logger, logging.INFO, "emergency_stop_comfyui_skipped", reason="stop_comfyui_on_critical_disabled")
+
+        if self.config.gpu.actions.stop_ollama_on_emergency:
+            results.append(self._run_emergency_step("emergency_stop_ollama", lambda: self._docker_actions.stop_container("ollama", reason=reason), reason))
+        else:
+            log_event(logger, logging.INFO, "emergency_stop_ollama_skipped", reason="stop_ollama_on_emergency_disabled")
+
+        if self.config.gpu.actions.shutdown_on_emergency:
+            results.append(self._run_emergency_step("emergency_shutdown", lambda: self._system_actions.safe_shutdown(reason=reason), reason))
+        else:
+            log_event(logger, logging.INFO, "emergency_shutdown_skipped", reason="shutdown_on_emergency_disabled")
+
+        return results[-1] if results else None
+
+    def _run_emergency_step(self, step_name: str, action_fn, reason: str) -> ActionResult:
+        try:
+            result = action_fn()
+        except Exception as exc:  # nunca debe abortar el resto de la secuencia de emergencia
+            now = datetime.now(timezone.utc)
+            logger.exception("emergency_step_unexpected_error step=%s", step_name)
+            result = ActionResult(
+                action_name=step_name, target=step_name, success=False, dry_run=self.config.general.dry_run,
+                message="fallo inesperado durante la secuencia de emergencia", reason=reason, timestamp=now, error=str(exc),
+            )
+        log_event(
+            logger, logging.WARNING if result.success else logging.ERROR, step_name,
+            success=result.success, dry_run=result.dry_run, error=result.error,
+        )
+        return result
 
     def _notify(self, snapshot: Snapshot, event: RuleEvent, action_result: Optional[ActionResult], recovered: bool) -> None:
         assert self.notification_dispatcher is not None  # los llamadores ya lo verificaron

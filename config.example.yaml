@@ -10,6 +10,11 @@ general:
   dry_run: true # IMPORTANTE: dejar en true hasta validar el comportamiento en tu servidor
   timezone: America/Mexico_City
   # state_file: /var/log/ai-guardian/state.json  # opcional; por defecto se guarda junto al log
+  # Tolerancia a huecos de telemetria (nvidia-smi/docker/psutil sin
+  # responder momentaneamente): un hueco mas corto que esto conserva el
+  # progreso de una condicion sostenida; uno mas largo lo reinicia, porque
+  # no hay evidencia de que la condicion se mantuvo durante ese intervalo.
+  # telemetry_gap_tolerance_seconds: 30
 
 logging:
   level: INFO
@@ -53,8 +58,14 @@ system:
   minimum_free_disk_gb: 20
   maximum_ram_percent: 95
   maximum_swap_percent: 80
-  # / y /mnt/ai-storage comparten el mismo filesystem en este servidor;
-  # agrega mas rutas aqui si en el futuro son discos separados.
+  # Uno o mas filesystems a vigilar (espacio libre minimo compartido, el
+  # mas lleno de la lista es el que determina la alerta). / y
+  # /mnt/ai-storage comparten el mismo filesystem en este servidor; si en
+  # el futuro agregas un disco separado para modelos (por ejemplo un
+  # segundo punto de montaje dedicado), agrega su ruta aqui:
+  #   disk_paths:
+  #     - /
+  #     - /mnt/otro-disco
   disk_paths:
     - /
 

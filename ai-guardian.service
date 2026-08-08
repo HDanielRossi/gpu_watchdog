@@ -21,6 +21,14 @@ TimeoutStopSec=30
 # No usar PrivateDevices=true: bloquearia el acceso de nvidia-smi a
 # /dev/nvidia*. No restringir AF_UNIX/AF_INET: se necesitan para el socket
 # de Docker y para las comprobaciones HTTP / Telegram.
+#
+# NoNewPrivileges=true + CapabilityBoundingSet= vacio se mantienen incluso
+# con shutdown_on_emergency habilitado: el apagado NO requiere sudo ni
+# capacidades nuevas en este proceso, se autoriza via una regla polkit
+# dedicada para systemd-logind (ver polkit/49-ai-guardian-shutdown.rules y
+# el README, seccion "Shutdown"). No debilitar estas dos lineas para
+# "arreglar" el shutdown: la via correcta es la regla polkit, no el
+# endurecimiento del servicio.
 NoNewPrivileges=true
 ProtectSystem=strict
 ReadWritePaths=/var/log/ai-guardian

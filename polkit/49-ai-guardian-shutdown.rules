@@ -1,0 +1,51 @@
+// Regla polkit de minimo privilegio para AI Guardian.
+//
+// Autoriza EXCLUSIVAMENTE al usuario de servicio 'ai-guardian' a solicitar
+// el apagado del host via systemd-logind (accion "power-off"), sin
+// necesidad de una sesion de escritorio activa. No concede ningun otro
+// privilegio: ni reboot, ni suspend/hibernate, ni gestion de unidades
+// systemd, ni sudo, ni capacidades adicionales al proceso del daemon.
+//
+// Por que es necesaria: el comando `shutdown` en un sistema systemd no usa
+// setuid, habla con systemd-logind por D-Bus (accion polkit
+// "org.freedesktop.login1.power-off"). Por defecto, polkit solo autoriza
+// esa accion a root o a un usuario con una sesion "activa" (login grafico o
+// de consola). El usuario 'ai-guardian' corre como servicio systemd sin
+// sesion, asi que sin esta regla la peticion de apagado queda denegada.
+//
+// Esta ruta es compatible con NoNewPrivileges=true en ai-guardian.service:
+// la autorizacion ocurre en systemd-logind (un proceso ya privilegiado),
+// no requiere que el proceso de AI Guardian gane privilegios nuevos via
+// setuid/capabilities, que es exactamente lo que NoNewPrivileges bloquea.
+// Por eso NO se usa sudo (sudo es un binario setuid: con NoNewPrivileges=true
+// su bit setuid se ignora y la escalada fallaria de todas formas).
+//
+// Instalacion (opcional, requiere root):
+//   sudo install -m 0644 polkit/49-ai-guardian-shutdown.rules \
+//       /etc/polkit-1/rules.d/49-ai-guardian-shutdown.rules
+//   sudo systemctl restart polkit
+//
+// Para revertir: borra el archivo instalado y reinicia polkit. El daemon
+// sigue funcionando con normalidad sin esta regla; solo queda sin permiso
+// para apagar el host aunque `shutdown_on_emergency: true` este activo en
+// la configuracion (la accion fallara con "fallo la ejecucion" en el log,
+// nunca de forma silenciosa).
+//
+// Notas de compatibilidad: valido para polkit >= 0.105 (reglas JS en
+// /etc/polkit-1/rules.d/), estandar en Ubuntu 20.04+. Verifica la accion
+// exacta que usa tu version de systemd-logind con:
+//   pkaction | grep power-off
+// Si tu distribucion usa el formato .pkla antiguo (localauthority), el
+// equivalente es un archivo en
+// /etc/polkit-1/localauthority/50-local.d/ con:
+//   [Autorizar apagado a ai-guardian]
+//   Identity=unix-user:ai-guardian
+//   Action=org.freedesktop.login1.power-off
+//   ResultAny=yes
+
+polkit.addRule(function(action, subject) {
+    if (action.id == "org.freedesktop.login1.power-off" &&
+        subject.user == "ai-guardian") {
+        return polkit.Result.YES;
+    }
+});

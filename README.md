@@ -39,6 +39,50 @@ notifica y/o ejecuta una accion → persiste el estado en JSON.
 El motor de reglas es intencionalmente puro (no conoce Docker ni
 subprocess) para que `test_rule_engine.py` no necesite mocks de sistema.
 
+## Modelo de seguridad (safety model)
+
+AI Guardian esta disenado para que activar cada vez mas automatizacion sea
+una decision explicita y gradual, nunca un efecto secundario de instalarlo:
+
+- **`dry_run: true` (default global)** — mientras este en `true`, ninguna
+  accion real se ejecuta sin importar los demas flags: cada una se registra
+  como `[dry_run] se habria ejecutado: ...`. Es la compuerta maestra.
+- **`WARNING`** — solo alerta/loguea (`log_warning: true` por defecto). Nunca
+  detiene nada.
+- **`CRITICAL`** — si `stop_comfyui_on_critical: true`, detiene ComfyUI.
+  Nada mas.
+- **`EMERGENCY`** — mas grave que CRITICAL y **no depende de que CRITICAL se
+  haya disparado antes** (son umbrales independientes; una subida de
+  temperatura muy rapida puede llegar a EMERGENCY sin pasar visiblemente por
+  CRITICAL). Secuencia fija, cada paso con su propio flag:
+  1. detener ComfyUI, si `stop_comfyui_on_critical: true`;
+  2. detener Ollama, si `stop_ollama_on_emergency: true`;
+  3. solicitar apagado del host, solo si `shutdown_on_emergency: true`.
+
+  Cada paso se ejecuta y registra de forma independiente; si uno falla o
+  lanza una excepcion inesperada, los siguientes igual se intentan (nunca se
+  aborta la secuencia a mitad de camino) y el fallo queda en el log. Repetir
+  el mismo evento EMERGENCY varias veces es seguro (idempotente): las
+  acciones subyacentes (`docker stop`, `shutdown -h +1`) ya toleran
+  repetirse.
+- **`cooldown` (`action_cooldown_seconds`)** — evita repetir la misma accion
+  en cada ciclo mientras la condicion se mantiene activa.
+- **`hysteresis` (`hysteresis_margin_c`)** — una alerta no se considera
+  recuperada hasta bajar claramente del umbral (evita parpadeo alrededor del
+  limite).
+- **`telemetry_gap_tolerance_seconds`** (default 30s) — cuanto puede faltar
+  una lectura (GPU/sistema/Docker inaccesible momentaneamente) sin invalidar
+  el progreso hacia una condicion sostenida. Un hueco corto conserva el
+  progreso; uno mas largo que la tolerancia lo reinicia, porque nunca se
+  debe afirmar que una condicion se mantuvo sostenida durante un intervalo
+  para el que no existen mediciones. Aplica igual tras un reinicio del
+  daemon (el hueco se sigue midiendo con el estado persistido).
+- **Acciones deshabilitadas de fabrica**: `stop_comfyui_on_critical`,
+  `stop_ollama_on_emergency`, `shutdown_on_emergency` y
+  `restart_unhealthy_containers` estan todas en `false` por defecto. Solo
+  `log_warning` esta en `true`. Nada se detiene ni se apaga hasta que
+  actives cada flag explicitamente Y pongas `dry_run: false`.
+
 ## Requisitos
 
 - Linux (probado en Ubuntu Server)
@@ -107,9 +151,15 @@ El archivo vive en `/etc/ai-guardian/config.yaml` (parte de
 
 Claves opcionales adicionales no listadas en el ejemplo (tienen defaults
 razonables en codigo si se omiten): `general.state_file`,
+`general.telemetry_gap_tolerance_seconds` (default 30s, ver
+[Safety model](#modelo-de-seguridad-safety-model)),
 `gpu.actions.action_cooldown_seconds` (default 300s), `system.disk_paths`
-(default `["/"]`; en este servidor `/mnt/ai-storage` es el mismo
-filesystem que `/`).
+(default `["/"]`; puede tener mas de una ruta, ver [Storage](#storage); en
+este servidor `/mnt/ai-storage` es el mismo filesystem que `/`).
+
+Todas las claves nuevas de esta version tienen defaults seguros y no
+rompen una `config.yaml` existente sin ellas: si tenias una instalacion
+previa a `v0.1.1`, `validate-config` seguira aceptandola tal cual.
 
 > Si cambias `logging.file` o `general.state_file` a una ruta fuera de
 > `/var/log/ai-guardian`, tambien debes actualizar `ReadWritePaths=` en
@@ -185,15 +235,13 @@ vez y observa unos dias antes de sumar la siguiente:
 4. `sudo systemctl restart ai-guardian` y confirma con
    `sudo journalctl -u ai-guardian -f`.
 
-Para `shutdown_on_emergency` hay una tercera compuerta: el usuario del
-servicio no tiene privilegios para apagar el sistema (ver
-[endurecimiento de systemd](#riesgos-del-grupo-docker) —
-`CapabilityBoundingSet=` vacio). Habilitarlo de verdad requiere ademas:
-editar `ai-guardian.service` para permitir la capacidad necesaria y
-configurar una regla `sudoers` minima que autorice unicamente el comando
-`shutdown` para el usuario `ai-guardian`. Esto es deliberado: un apagado
-automatico del servidor es la accion mas dificil de revertir de todas, y
-requiere que rompas tres barreras independientes a proposito.
+Para `shutdown_on_emergency` hay una tercera compuerta, ver la seccion
+[Shutdown](#shutdown) mas abajo: requiere ademas instalar una regla polkit
+dedicada, sin la cual el apagado fallara con un error de permisos (nunca de
+forma silenciosa). Esto es deliberado: un apagado automatico del servidor
+es la accion mas dificil de revertir de todas, y requiere que rompas tres
+barreras independientes a proposito (`dry_run`, el flag de la accion, y la
+autorizacion de sistema).
 
 ## Como regresar a dry_run
 
@@ -209,6 +257,134 @@ sudo systemctl restart ai-guardian
 Es instantaneo y no requiere deshabilitar las acciones individuales (el
 flag global de `dry_run` tiene prioridad: mientras este en `true`, ninguna
 accion real se ejecuta sin importar los demas flags).
+
+## Shutdown
+
+`shutdown_on_emergency` esta en `false` por defecto y AI Guardian nunca lo
+activa por si solo. Razon: apagar el servidor es, de las acciones
+disponibles, la unica practicamente irreversible mientras esta en curso, y
+el proceso del daemon corre deliberadamente sin privilegios (usuario
+`ai-guardian`, `NoNewPrivileges=true`, `CapabilityBoundingSet=` vacio en
+`ai-guardian.service`).
+
+**Por que `shutdown -h +1` puede fallar tal cual, sin tocar nada mas.**
+En un sistema systemd (como este), el comando `shutdown` no usa un binario
+`setuid`: negocia el apagado con `systemd-logind` via D-Bus (accion polkit
+`org.freedesktop.login1.power-off`). Por politica por defecto, polkit solo
+autoriza esa accion a root o a un usuario con una sesion "activa" (login
+grafico o de consola); el usuario `ai-guardian` corre como servicio systemd
+sin sesion, asi que la peticion queda denegada — el proceso nunca gana ni
+necesita privilegios nuevos, simplemente D-Bus/polkit la rechazan.
+
+**Por que la solucion NO es sudo.** `sudo` es un binario `setuid`; con
+`NoNewPrivileges=true` (que este proyecto no debilita) el kernel ignora ese
+bit setuid, asi que una regla sudoers no funcionaria de todas formas aunque
+se agregara. Dar sudo general o `NOPASSWD: ALL` al usuario del servicio
+tampoco es aceptable: equivaldria a root completo.
+
+**Solucion de minimo privilegio elegida: una regla polkit dedicada**
+(`polkit/49-ai-guardian-shutdown.rules`). Autoriza EXCLUSIVAMENTE al
+usuario `ai-guardian` a solicitar la accion `power-off` a
+`systemd-logind`, sin sesion activa y sin ningun otro privilegio (nada de
+reboot, suspend, gestion de unidades, sudo ni capacidades nuevas al
+proceso). La autorizacion ocurre dentro de `systemd-logind` (un proceso ya
+privilegiado), no en el proceso de AI Guardian, por lo que es totalmente
+compatible con `NoNewPrivileges=true` — no se toca el endurecimiento del
+servicio.
+
+**Como habilitarlo (opcional, dos pasos independientes):**
+
+1. Instala la regla polkit (una vez, requiere root):
+   ```bash
+   sudo install -m 0644 polkit/49-ai-guardian-shutdown.rules \
+       /etc/polkit-1/rules.d/49-ai-guardian-shutdown.rules
+   sudo systemctl restart polkit
+   ```
+   `install.sh` tambien lo ofrece como paso opcional confirm-gated.
+2. En `/etc/ai-guardian/config.yaml`, con `dry_run` todavia en `true`,
+   activa el flag y observa el log unos dias (veras
+   `[dry_run] se habria ejecutado: shutdown -h +1 ...` cuando la condicion
+   se cumpla de verdad):
+   ```yaml
+   gpu:
+     actions:
+       shutdown_on_emergency: true
+   ```
+3. Solo cuando confirmes que el disparo ocurre cuando esperas, cambia
+   `general.dry_run: false` y `sudo systemctl restart ai-guardian`.
+
+**Como deshabilitarlo de nuevo (cualquiera de las tres barreras alcanza):**
+
+- Inmediato y reversible: `general.dry_run: true` + reiniciar el servicio.
+- `gpu.actions.shutdown_on_emergency: false` + reiniciar el servicio.
+- Revertir el permiso de sistema:
+  ```bash
+  sudo rm /etc/polkit-1/rules.d/49-ai-guardian-shutdown.rules
+  sudo systemctl restart polkit
+  ```
+  (`uninstall.sh` lo ofrece como paso opcional confirm-gated). Sin la
+  regla, el daemon sigue funcionando con normalidad; solo la accion de
+  apagado fallara con un error de permisos visible en el log.
+
+## Updating
+
+La instalacion usa `pip install /opt/ai/guardian` **no editable** (decision
+deliberada para produccion): el paquete se copia dentro del venv en el
+momento de instalar, asi que un simple `git pull` en `/opt/ai/guardian`
+**no** actualiza por si solo lo que el servicio esta corriendo. Usa
+`update.sh` para actualizar una instalacion existente de forma segura:
+
+```bash
+cd /opt/ai/guardian
+sudo ./update.sh
+```
+
+El script (`set -Eeuo pipefail`):
+
+1. Verifica que `/opt/ai/guardian` es el repositorio correcto (remoto
+   `HDanielRossi/gpu_watchdog`).
+2. Aborta si hay cambios locales sin confirmar (nunca ejecuta
+   `git reset --hard` automaticamente).
+3. `git fetch` + `git merge --ff-only` (nunca reescribe historia local).
+4. Reinstala el paquete en el `.venv` existente.
+5. Corre `pytest -q` **antes** de tocar el servicio.
+6. Si los tests fallan, se detiene ahi: el servicio sigue corriendo con la
+   version anterior, sin reiniciarse.
+7. Solo si todo paso, reinicia `ai-guardian` y muestra
+   `systemctl status` al final.
+
+## Storage
+
+`system.disk_paths` acepta una lista de uno o mas puntos de montaje; cada
+uno se reporta y evalua por separado (el mas lleno de la lista es el que
+determina la alerta `system_disk_low`). Util si en el futuro agregas
+almacenamiento adicional para modelos en un filesystem separado:
+
+```yaml
+system:
+  minimum_free_disk_gb: 20
+  maximum_ram_percent: 95
+  maximum_swap_percent: 80
+  disk_paths:
+    - /
+    - /mnt/mi-disco-de-modelos
+```
+
+Ninguna ruta especifica esta hardcodeada como requisito del proyecto; el
+default sigue siendo `["/"]` si se omite la clave.
+
+## Testing
+
+```bash
+cd /opt/ai/guardian
+.venv/bin/pip install -e ".[dev]"   # si aun no se instalo
+.venv/bin/pytest -v
+```
+
+Toda la suite usa mocks/fakes para `nvidia-smi`, `docker`, `shutdown` y las
+llamadas HTTP: ningun test detiene contenedores reales, apaga el servidor,
+ni depende de tener una GPU o Docker disponibles. Por eso corre igual en
+CI (`.github/workflows/test.yml`, sin GPU ni Docker real).
 
 ## Como desinstalar
 
@@ -272,7 +448,11 @@ tener privilegios de root en la maquina.**
 automaticamente: pregunta primero y muestra esta misma advertencia. Sin
 ese acceso, el monitor de Docker seguira funcionando pero reportara
 `docker_available: false` (el daemon sigue vivo, solo sin datos de
-contenedores).
+contenedores). Esto **no** se trata como "contenedores detenidos": el
+estado de cada contenedor es tri-valor (`True` corriendo / `False`
+detenido confirmado / `None` desconocido), y con Docker inaccesible cada
+servicio queda en `None` — AI Guardian igual intenta el chequeo HTTP
+directo antes de asumir nada (ver siguiente seccion).
 
 Alternativas mas restrictivas si esto te preocupa (fuera del alcance de
 esta primera version, pero documentadas para referencia futura):
@@ -298,7 +478,10 @@ funcionando (solo sin metricas de GPU); revisa el driver.
 **`Docker: NO disponible`**
 Verifica `docker info`. Si el usuario `ai-guardian` no esta en el grupo
 `docker`, agregalo conscientemente (ver seccion anterior) y reinicia el
-servicio.
+servicio. Mientras tanto, los servicios HTTP (ComfyUI/Ollama/Open WebUI)
+siguen chequeandose por su cuenta: si responden, se reportan como sanos
+aunque Docker este inaccesible (el estado del contenedor queda como
+"desconocido", nunca se asume "detenido" sin que Docker lo confirme).
 
 **El servicio reinicia en bucle**
 `sudo journalctl -u ai-guardian -n 100` para ver la excepcion. Si es un

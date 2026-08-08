@@ -27,6 +27,12 @@ DEFAULT_SYSTEM_COOLDOWN_SECONDS = 300.0
 DEFAULT_VRAM_HYSTERESIS_MARGIN_PERCENT = 5.0
 DEFAULT_POWER_HYSTERESIS_MARGIN_W = 20.0
 DEFAULT_DOCKER_UNHEALTHY_DURATION_SECONDS = 60.0
+DEFAULT_TELEMETRY_GAP_TOLERANCE_SECONDS = 30.0
+
+# Cota superior de cordura para umbrales de temperatura (no es un limite
+# fisico real de la GPU/CPU, solo evita configuraciones absurdas como
+# "critical_temperature_c: 5000" por un error de tipeo).
+_MAX_SANE_TEMPERATURE_C = 150.0
 
 
 class ConfigError(Exception):
@@ -43,6 +49,10 @@ class GeneralConfig:
     dry_run: bool = True
     timezone: str = "UTC"
     state_file: Optional[str] = None
+    # Cuanto tiempo puede faltar una lectura (value=None) sin invalidar el
+    # progreso de un ThresholdWatcher hacia una condicion sostenida. Ver
+    # guardian.rules.engine.ThresholdWatcher.
+    telemetry_gap_tolerance_seconds: float = DEFAULT_TELEMETRY_GAP_TOLERANCE_SECONDS
 
 
 @dataclass
@@ -195,17 +205,38 @@ def _require_str(raw: Any, path: str, errors: list[str], default: str) -> str:
     return raw
 
 
+def _check_non_negative(value: float, path: str, errors: list[str]) -> None:
+    if value < 0:
+        errors.append(f"'{path}' no puede ser negativo (se recibio: {value})")
+
+
+def _check_percent(value: float, path: str, errors: list[str]) -> None:
+    if not (0 <= value <= 100):
+        errors.append(f"'{path}' debe estar entre 0 y 100 (se recibio: {value})")
+
+
+def _check_range(value: float, path: str, errors: list[str], minimum: float, maximum: float) -> None:
+    if not (minimum <= value <= maximum):
+        errors.append(f"'{path}' debe estar entre {minimum} y {maximum} (se recibio: {value})")
+
+
 def _parse_general(raw: Any, errors: list[str]) -> GeneralConfig:
     d = _require_dict(raw, "general", errors)
     interval = _require_number(d.get("interval_seconds"), "general.interval_seconds", errors, 10.0)
     if interval <= 0:
         errors.append("'general.interval_seconds' debe ser mayor a 0")
         interval = 10.0
+    gap_tolerance = _require_number(
+        d.get("telemetry_gap_tolerance_seconds"), "general.telemetry_gap_tolerance_seconds",
+        errors, DEFAULT_TELEMETRY_GAP_TOLERANCE_SECONDS,
+    )
+    _check_non_negative(gap_tolerance, "general.telemetry_gap_tolerance_seconds", errors)
     return GeneralConfig(
         interval_seconds=interval,
         dry_run=_require_bool(d.get("dry_run"), "general.dry_run", errors, True),
         timezone=_require_str(d.get("timezone"), "general.timezone", errors, "UTC"),
         state_file=d.get("state_file"),
+        telemetry_gap_tolerance_seconds=gap_tolerance,
     )
 
 
@@ -248,6 +279,13 @@ def _parse_gpu(raw: Any, errors: list[str]) -> GpuConfig:
             "warning < critical < emergency "
             f"({thresholds.warning_temperature_c} < {thresholds.critical_temperature_c} < {thresholds.emergency_temperature_c})"
         )
+    for field_name in ("warning_temperature_c", "critical_temperature_c", "emergency_temperature_c"):
+        _check_range(getattr(thresholds, field_name), f"gpu.thresholds.{field_name}", errors, 0.0, _MAX_SANE_TEMPERATURE_C)
+    for field_name in ("warning_duration_seconds", "critical_duration_seconds", "emergency_duration_seconds"):
+        _check_non_negative(getattr(thresholds, field_name), f"gpu.thresholds.{field_name}", errors)
+    _check_non_negative(thresholds.hysteresis_margin_c, "gpu.thresholds.hysteresis_margin_c", errors)
+    _check_percent(thresholds.maximum_vram_percent, "gpu.thresholds.maximum_vram_percent", errors)
+    _check_non_negative(thresholds.maximum_power_watts, "gpu.thresholds.maximum_power_watts", errors)
 
     action_defaults = GpuActionsConfig()
     actions = GpuActionsConfig(
@@ -257,6 +295,7 @@ def _parse_gpu(raw: Any, errors: list[str]) -> GpuConfig:
         shutdown_on_emergency=_require_bool(a.get("shutdown_on_emergency"), "gpu.actions.shutdown_on_emergency", errors, action_defaults.shutdown_on_emergency),
         action_cooldown_seconds=_require_number(a.get("action_cooldown_seconds"), "gpu.actions.action_cooldown_seconds", errors, DEFAULT_GPU_ACTION_COOLDOWN_SECONDS),
     )
+    _check_non_negative(actions.action_cooldown_seconds, "gpu.actions.action_cooldown_seconds", errors)
 
     index = _require_int(d.get("index"), "gpu.index", errors, 0)
     if index < 0:
@@ -278,10 +317,24 @@ def _parse_system(raw: Any, errors: list[str]) -> SystemConfig:
     if not isinstance(disk_paths, list) or not all(isinstance(p, str) for p in disk_paths):
         errors.append("'system.disk_paths' debe ser una lista de rutas (cadenas)")
         disk_paths = defaults.disk_paths
+    elif not disk_paths:
+        errors.append("'system.disk_paths' no puede ser una lista vacia")
+        disk_paths = defaults.disk_paths
+    elif any(not p.strip() for p in disk_paths):
+        errors.append("'system.disk_paths' contiene una ruta vacia")
+        disk_paths = defaults.disk_paths
+
+    minimum_free_disk_gb = _require_number(d.get("minimum_free_disk_gb"), "system.minimum_free_disk_gb", errors, defaults.minimum_free_disk_gb)
+    maximum_ram_percent = _require_number(d.get("maximum_ram_percent"), "system.maximum_ram_percent", errors, defaults.maximum_ram_percent)
+    maximum_swap_percent = _require_number(d.get("maximum_swap_percent"), "system.maximum_swap_percent", errors, defaults.maximum_swap_percent)
+    _check_non_negative(minimum_free_disk_gb, "system.minimum_free_disk_gb", errors)
+    _check_percent(maximum_ram_percent, "system.maximum_ram_percent", errors)
+    _check_percent(maximum_swap_percent, "system.maximum_swap_percent", errors)
+
     return SystemConfig(
-        minimum_free_disk_gb=_require_number(d.get("minimum_free_disk_gb"), "system.minimum_free_disk_gb", errors, defaults.minimum_free_disk_gb),
-        maximum_ram_percent=_require_number(d.get("maximum_ram_percent"), "system.maximum_ram_percent", errors, defaults.maximum_ram_percent),
-        maximum_swap_percent=_require_number(d.get("maximum_swap_percent"), "system.maximum_swap_percent", errors, defaults.maximum_swap_percent),
+        minimum_free_disk_gb=minimum_free_disk_gb,
+        maximum_ram_percent=maximum_ram_percent,
+        maximum_swap_percent=maximum_swap_percent,
         disk_paths=disk_paths,
     )
 
@@ -340,9 +393,11 @@ def _parse_notifications(raw: Any, errors: list[str]) -> NotificationsConfig:
                 f"'notifications.telegram.enabled' es true pero la variable de entorno "
                 f"'{telegram.chat_id_env}' no esta definida"
             )
+    cooldown_seconds = _require_number(d.get("cooldown_seconds"), "notifications.cooldown_seconds", errors, 300.0)
+    _check_non_negative(cooldown_seconds, "notifications.cooldown_seconds", errors)
     return NotificationsConfig(
         enabled=_require_bool(d.get("enabled"), "notifications.enabled", errors, False),
-        cooldown_seconds=_require_number(d.get("cooldown_seconds"), "notifications.cooldown_seconds", errors, 300.0),
+        cooldown_seconds=cooldown_seconds,
         telegram=telegram,
     )
 

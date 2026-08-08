@@ -12,6 +12,7 @@ SERVICE_USER="ai-guardian"
 ETC_DIR="/etc/ai-guardian"
 LOG_DIR="/var/log/ai-guardian"
 SYSTEMD_UNIT_DST="/etc/systemd/system/ai-guardian.service"
+POLKIT_RULE_DST="/etc/polkit-1/rules.d/49-ai-guardian-shutdown.rules"
 
 log() { echo "[uninstall] $*"; }
 
@@ -68,6 +69,12 @@ main() {
     if id "${SERVICE_USER}" >/dev/null 2>&1 && confirm "¿Eliminar el usuario de servicio '${SERVICE_USER}'?"; then
         userdel "${SERVICE_USER}"
         log "usuario '${SERVICE_USER}' eliminado."
+    fi
+
+    if [[ -f "${POLKIT_RULE_DST}" ]] && confirm "¿Eliminar la regla polkit de apagado (${POLKIT_RULE_DST})?"; then
+        rm -f "${POLKIT_RULE_DST}"
+        systemctl restart polkit || true
+        log "regla polkit eliminada."
     fi
 
     echo

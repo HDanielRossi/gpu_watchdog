@@ -10,6 +10,8 @@ import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
+from typing import Optional
+
 from guardian.models import ServiceCheck, ServiceStatus
 
 logger = logging.getLogger("ai_guardian.monitors.services")
@@ -22,15 +24,21 @@ class ServiceHealthChecker:
         self._timeout = timeout
         self._slow_threshold_ms = slow_threshold_ms
 
-    def check(self, name: str, url: str, container_running: bool) -> ServiceCheck:
+    def check(self, name: str, url: str, container_running: Optional[bool]) -> ServiceCheck:
         """Comprueba la salud HTTP de un servicio.
 
-        Si el contenedor no esta corriendo, se evita la llamada HTTP (que de
-        todas formas fallaria) y se reporta directamente `stopped`.
+        `container_running` es tri-valor: True/False confirmados por Docker,
+        o None si Docker no pudo consultarse (estado desconocido). Solo se
+        evita la llamada HTTP cuando Docker CONFIRMA que el contenedor esta
+        detenido (`False`); si es `True` o `None` se intenta igual el HTTP
+        check, porque un `None` no implica que el servicio este caido (p.ej.
+        el socket de Docker esta inaccesible pero el proceso sigue arriba).
         """
         now = datetime.now(timezone.utc)
-        if not container_running:
+        if container_running is False:
             return ServiceCheck(name=name, status=ServiceStatus.STOPPED, timestamp=now)
+        if container_running is None:
+            logger.info("service_docker_status_unknown name=%s accion=intentando_http_de_todas_formas", name)
 
         start = time.monotonic()
         request = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})

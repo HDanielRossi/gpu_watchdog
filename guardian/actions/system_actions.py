@@ -6,6 +6,17 @@ explicitamente en `true` en la configuracion ademas de que dry_run sea
 `kill -9` ni un apagado inmediato: usa `shutdown -h +1` (un minuto de
 margen) para dar tiempo a que las cargas de IA, detenidas previamente por
 las acciones de Docker, terminen de liberar la GPU.
+
+Permisos: bajo el usuario de servicio `ai-guardian` (sin privilegios,
+`NoNewPrivileges=true`, `CapabilityBoundingSet=` vacio en
+ai-guardian.service), `shutdown -h +1` fallara por defecto. En un sistema
+systemd el comando `shutdown` no usa setuid: negocia con systemd-logind por
+D-Bus, y polkit deniega esa accion a un usuario de servicio sin sesion
+activa. La compuerta de minimo privilegio para habilitarlo de verdad es una
+regla polkit dedicada (ver `polkit/49-ai-guardian-shutdown.rules` y el
+README), no sudo ni capacidades nuevas: sudo es un binario setuid y
+`NoNewPrivileges=true` ignora su bit setuid, asi que una regla sudoers
+tampoco funcionaria aqui aunque se agregara.
 """
 from __future__ import annotations
 

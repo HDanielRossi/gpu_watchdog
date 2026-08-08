@@ -16,6 +16,8 @@ CONFIG_PATH="${ETC_DIR}/config.yaml"
 ENV_PATH="${ETC_DIR}/guardian.env"
 SYSTEMD_UNIT_SRC="${GUARDIAN_DIR}/ai-guardian.service"
 SYSTEMD_UNIT_DST="/etc/systemd/system/ai-guardian.service"
+POLKIT_RULE_SRC="${GUARDIAN_DIR}/polkit/49-ai-guardian-shutdown.rules"
+POLKIT_RULE_DST="/etc/polkit-1/rules.d/49-ai-guardian-shutdown.rules"
 
 log() { echo "[install] $*"; }
 err() { echo "[install] ERROR: $*" >&2; }
@@ -175,6 +177,32 @@ step_enable_start() {
     fi
 }
 
+step_offer_shutdown_polkit_rule() {
+    if [[ -f "${POLKIT_RULE_DST}" ]]; then
+        log "ya existe una regla polkit de apagado instalada en ${POLKIT_RULE_DST}, no se modifica."
+        return
+    fi
+    if ! command -v polkitd >/dev/null 2>&1 && ! [[ -d /etc/polkit-1 ]]; then
+        log "polkit no parece estar instalado; se omite el paso de apagado remoto (opcional)."
+        return
+    fi
+    echo
+    log "OPCIONAL: 'gpu.actions.shutdown_on_emergency' (config.yaml) esta en"
+    log "'false' por defecto y seguira estandolo aunque instales esta regla."
+    log "Sin ella, si algun dia habilitas esa opcion, el apagado fallara con"
+    log "un error de permisos (registrado en el log, nunca de forma silenciosa)."
+    log "La regla autoriza EXCLUSIVAMENTE al usuario '${SERVICE_USER}' a pedirle"
+    log "el apagado a systemd-logind; no otorga sudo ni capacidades nuevas."
+    log "Detalle tecnico completo en: ${POLKIT_RULE_SRC}"
+    if confirm "¿Instalar la regla polkit de apagado minimo-privilegio ahora?"; then
+        install -m 0644 "${POLKIT_RULE_SRC}" "${POLKIT_RULE_DST}"
+        systemctl restart polkit || log "AVISO: no se pudo reiniciar polkit automaticamente; reinicialo manualmente (sudo systemctl restart polkit)."
+        log "regla polkit instalada en ${POLKIT_RULE_DST}."
+    else
+        log "omitido. Puedes instalarla despues manualmente, ver ${POLKIT_RULE_SRC}."
+    fi
+}
+
 main() {
     require_root
     step_check_linux
@@ -187,6 +215,7 @@ main() {
     step_install_config
     step_install_systemd_unit
     step_validate_config
+    step_offer_shutdown_polkit_rule
     step_enable_start
 
     echo

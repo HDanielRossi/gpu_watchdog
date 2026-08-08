@@ -45,16 +45,20 @@ class DockerMonitor:
         if not result.ok:
             stderr_lower = (result.stderr or "").lower()
             if any(marker in stderr_lower for marker in _NOT_FOUND_MARKERS):
+                # Docker respondio y confirmo que el contenedor no existe:
+                # esto SI es una confirmacion de "no esta corriendo".
                 return ContainerStatus(name=name, exists=False, running=False, status="not_found", timestamp=now)
             error = result.error or result.stderr.strip() or "fallo desconocido al inspeccionar el contenedor"
             logger.error("docker_inspect_failed container=%s error=%s", name, error)
-            return ContainerStatus(name=name, exists=False, running=False, status="unknown", error=error, timestamp=now)
+            # No se pudo consultar Docker (timeout, socket inaccesible, etc.):
+            # estado desconocido, NUNCA asumir que esta detenido.
+            return ContainerStatus(name=name, exists=False, running=None, status="unknown", error=error, timestamp=now)
 
         try:
             data = json.loads(result.stdout)[0]
         except (json.JSONDecodeError, IndexError, KeyError) as exc:
             logger.error("docker_inspect_parse_failed container=%s error=%s", name, exc)
-            return ContainerStatus(name=name, exists=False, running=False, status="unknown", error=str(exc), timestamp=now)
+            return ContainerStatus(name=name, exists=False, running=None, status="unknown", error=str(exc), timestamp=now)
 
         state = data.get("State", {}) or {}
         status = state.get("Status", "unknown")

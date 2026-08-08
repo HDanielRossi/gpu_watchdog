@@ -76,7 +76,10 @@ class SystemSample:
 class ContainerStatus:
     name: str
     exists: bool
-    running: bool
+    # True = Docker confirma que corre; False = Docker confirma que esta
+    # detenido/no existe; None = Docker no pudo consultarse (estado
+    # desconocido, no se debe asumir detenido). Ver ServiceHealthChecker.
+    running: Optional[bool]
     status: str  # running / exited / restarting / paused / not_found / unknown
     health: Optional[str] = None  # healthy / unhealthy / starting / None
     restart_count: int = 0
