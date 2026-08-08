@@ -21,3 +21,9 @@ jobs:
       # nvidia-smi, docker y las acciones de apagado (ver tests/).
       - name: Ejecutar tests
         run: pytest -v
+
+      # Comprobaciones de shell de update.sh (rama incorrecta, working
+      # tree sucio, remoto equivocado). Sin sudo/root/red: usa repos git
+      # locales de prueba, nunca toca /opt/ai/guardian ni systemd.
+      - name: Ejecutar tests de update.sh
+        run: bash tests/test_update_sh.sh
